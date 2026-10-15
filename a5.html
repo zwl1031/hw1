@@ -1,0 +1,468 @@
+
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>霓虹俄羅斯方塊</title>
+<style>
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh; padding: 20px 10px;
+  background: radial-gradient(ellipse at top, #19264b, #080b18 70%);
+  color: white; font-family: system-ui, sans-serif;
+  display: flex; flex-direction: column; align-items: center;
+}
+h1 { margin: 5px 0 15px; color: #54f7ff;
+  text-shadow: 0 0 15px #00cfff; letter-spacing: 3px; }
+.game { display: flex; gap: 14px; align-items: flex-start; }
+canvas {
+  display: block; background: #090d1b;
+  border: 2px solid #36ddeb; border-radius: 5px;
+  box-shadow: 0 0 20px #00bcd455;
+}
+#board { width: min(60vw, 300px); height: auto; }
+.side { width: 115px; display: flex; flex-direction: column; gap: 12px; }
+.panel {
+  padding: 10px; border: 1px solid #31456c;
+  background: #121b30; border-radius: 8px;
+}
+.label { font-size: 12px; color: #9caecf; }
+.value { font-size: 23px; color: #60f6ff; font-weight: bold; }
+#next { width: 100%; height: auto; }
+button {
+  border: 1px solid #40dfea; border-radius: 8px;
+  padding: 10px; background: #152c46; color: white;
+  font-size: 14px; cursor: pointer;
+}
+button:hover { background: #205273; }
+.controls {
+  display: grid; grid-template-columns: repeat(3, 64px);
+  gap: 8px; margin-top: 17px;
+}
+.controls button { font-size: 22px; padding: 12px 0; touch-action: manipulation; }
+.controls .wide { grid-column: span 3; font-size: 15px; }
+.help { color: #9caecf; font-size: 12px; margin-top: 16px; text-align: center; }
+@media(max-width: 370px) {
+  .game { gap: 8px; }
+  .side { width: 95px; }
+  .value { font-size: 19px; }
+}
+</style>
+</head>
+<body>
+<h1>NEON BLOCKS</h1>
+<div class="game">
+  <canvas id="board" width="300" height="600"></canvas>
+  <div class="side">
+    <div class="panel">
+      <div class="label">SCORE 分數</div>
+      <div class="value" id="score">0</div>
+    </div>
+    <div class="panel">
+      <div class="label">LINES 消行</div>
+      <div class="value" id="lines">0</div>
+    </div>
+    <div class="panel">
+      <div class="label">LEVEL 等級</div>
+      <div class="value" id="level">1</div>
+    </div>
+    <div class="panel">
+      <div class="label">NEXT 下一個</div>
+      <canvas id="next" width="100" height="100"></canvas>
+    </div>
+    <button id="start">▶ 開始遊戲</button>
+    <button id="pause">⏸ 暫停</button>
+    <button id="sound">🔊 音效：開</button>
+  </div>
+</div>
+
+<div class="controls">
+  <button data-key="ArrowLeft">◀</button>
+  <button data-key="ArrowUp">↻</button>
+  <button data-key="ArrowRight">▶</button>
+  <button data-key="ArrowDown">▼</button>
+  <button id="drop">⤓ 快速落下</button>
+  <button id="mobilePause">Ⅱ</button>
+</div>
+<div class="help">
+  ← → 移動　↑ 旋轉　↓ 加速下落　空白鍵快速落下<br>
+  P 暫停　R 重新開始
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  const nextCanvas = document.getElementById('next');
+  const nctx = nextCanvas.getContext('2d');
+
+  const COLS = 10, ROWS = 20, SIZE = 30;
+  const COLORS = [null, '#39e8ff', '#397bff', '#ff9c42',
+    '#ffe64a', '#52ff9b', '#c15bff', '#ff527c'];
+
+  const SHAPES = [
+    [[1,1,1,1]],
+    [[2,0,0],[2,2,2]],
+    [[0,0,3],[3,3,3]],
+    [[4,4],[4,4]],
+    [[0,5,5],[5,5,0]],
+    [[0,6,0],[6,6,6]],
+    [[7,7,0],[0,7,7]]
+  ];
+
+  let arena, piece, nextPiece, score, lines, level;
+  let running = false, paused = false, over = false;
+  let lastTime = 0, dropCounter = 0;
+  let soundOn = true, audio = null, musicTimer = null;
+  let musicStep = 0;
+
+  function initAudio() {
+    if (!audio) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) audio = new AC();
+    }
+    if (audio && audio.state === 'suspended') audio.resume();
+  }
+
+  function tone(freq, duration = 0.08, type = 'sine', volume = 0.045) {
+    if (!soundOn || !audio) return;
+    const osc = audio.createOscillator();
+    const gain = audio.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, audio.currentTime);
+    gain.gain.setValueAtTime(volume, audio.currentTime);
+    gain.gain.exponentialRampToValueAtTime(
+      0.001, audio.currentTime + duration
+    );
+    osc.connect(gain);
+    gain.connect(audio.destination);
+    osc.start();
+    osc.stop(audio.currentTime + duration);
+  }
+
+  function play(name) {
+    if (name === 'move') tone(280, 0.035, 'square', 0.018);
+    if (name === 'rotate') tone(480, 0.07, 'triangle');
+    if (name === 'drop') {
+      tone(150, 0.12, 'sawtooth', 0.04);
+      setTimeout(() => tone(90, 0.1, 'sawtooth', 0.025), 35);
+    }
+    if (name === 'clear') {
+      [523, 659, 784, 1047].forEach((f, i) =>
+        setTimeout(() => tone(f, 0.16, 'triangle', 0.055), i * 65)
+      );
+    }
+    if (name === 'over') {
+      [440, 370, 311, 220].forEach((f, i) =>
+        setTimeout(() => tone(f, 0.22, 'sawtooth', 0.04), i * 150)
+      );
+    }
+  }
+
+  function startMusic() {
+    stopMusic();
+    if (!soundOn || !audio) return;
+    const notes = [130.81, 164.81, 196, 164.81, 146.83, 174.61, 220, 174.61];
+    musicStep = 0;
+    musicTimer = setInterval(() => {
+      if (running && !paused && soundOn) {
+        tone(notes[musicStep % notes.length], 0.16, 'triangle', 0.012);
+        musicStep++;
+      }
+    }, 240);
+  }
+
+  function stopMusic() {
+    if (musicTimer) clearInterval(musicTimer);
+    musicTimer = null;
+  }
+
+  function makePiece() {
+    const shape = SHAPES[Math.floor(Math.random() * SHAPES.length)];
+    return {
+      matrix: shape.map(row => row.slice()),
+      x: Math.floor(COLS / 2) - Math.ceil(shape[0].length / 2),
+      y: 0
+    };
+  }
+
+  function reset() {
+    arena = Array.from({length: ROWS}, () => Array(COLS).fill(0));
+    score = 0; lines = 0; level = 1;
+    piece = makePiece();
+    nextPiece = makePiece();
+    running = true; paused = false; over = false;
+    dropCounter = 0; lastTime = performance.now();
+    updateStats();
+    document.getElementById('start').textContent = '↻ 重新開始';
+    startMusic();
+    draw();
+  }
+
+  function collide(p, dx = 0, dy = 0, matrix = p.matrix) {
+    for (let y = 0; y < matrix.length; y++) {
+      for (let x = 0; x < matrix[y].length; x++) {
+        if (!matrix[y][x]) continue;
+        const ax = p.x + x + dx, ay = p.y + y + dy;
+        if (ax < 0 || ax >= COLS || ay >= ROWS) return true;
+        if (ay >= 0 && arena[ay][ax]) return true;
+      }
+    }
+    return false;
+  }
+
+  function merge() {
+    piece.matrix.forEach((row, y) => row.forEach((v, x) => {
+      if (v && piece.y + y >= 0)
+        arena[piece.y + y][piece.x + x] = v;
+    }));
+  }
+
+  function clearLines() {
+    let cleared = 0;
+    for (let y = ROWS - 1; y >= 0; y--) {
+      if (arena[y].every(v => v !== 0)) {
+        arena.splice(y, 1);
+        arena.unshift(Array(COLS).fill(0));
+        cleared++;
+        y++;
+      }
+    }
+    if (cleared) {
+      const points = [0, 100, 300, 500, 800];
+      score += (points[cleared] || cleared * 250) * level;
+      lines += cleared;
+      level = Math.floor(lines / 10) + 1;
+      play('clear');
+      updateStats();
+    }
+  }
+
+  function spawn() {
+    piece = nextPiece;
+    nextPiece = makePiece();
+    drawNext();
+    if (collide(piece)) {
+      running = false; over = true;
+      stopMusic();
+      play('over');
+      draw();
+    }
+  }
+
+  function lock() {
+    merge();
+    clearLines();
+    play('drop');
+    spawn();
+  }
+
+  function move(dx) {
+    if (!running || paused) return;
+    if (!collide(piece, dx, 0)) {
+      piece.x += dx;
+      play('move');
+      draw();
+    }
+  }
+
+  function rotate() {
+    if (!running || paused) return;
+    const m = piece.matrix;
+    const rotated = m[0].map((_, i) =>
+      m.map(row => row[i]).reverse()
+    );
+    for (const offset of [0, -1, 1, -2, 2]) {
+      if (!collide(piece, offset, 0, rotated)) {
+        piece.x += offset;
+        piece.matrix = rotated;
+        play('rotate');
+        draw();
+        return;
+      }
+    }
+  }
+
+  function softDrop() {
+    if (!running || paused) return;
+    if (!collide(piece, 0, 1)) {
+      piece.y++;
+      score++;
+      updateStats();
+    } else lock();
+    dropCounter = 0;
+    draw();
+  }
+
+  function hardDrop() {
+    if (!running || paused) return;
+    let distance = 0;
+    while (!collide(piece, 0, 1)) {
+      piece.y++;
+      distance++;
+    }
+    score += distance * 2;
+    lock();
+    updateStats();
+    draw();
+  }
+
+  function togglePause() {
+    if (!running || over) return;
+    paused = !paused;
+    if (paused) stopMusic();
+    else startMusic();
+    draw();
+  }
+
+  function updateStats() {
+    document.getElementById('score').textContent = score;
+    document.getElementById('lines').textContent = lines;
+    document.getElementById('level').textContent = level;
+  }
+
+  function cell(x, y, color, context = ctx, size = SIZE) {
+    context.fillStyle = color;
+    context.fillRect(x * size + 1, y * size + 1, size - 2, size - 2);
+    context.fillStyle = 'rgba(255,255,255,0.16)';
+    context.fillRect(x * size + 3, y * size + 3, size - 6, 3);
+    context.strokeStyle = 'rgba(255,255,255,0.22)';
+    context.strokeRect(x * size + 1, y * size + 1, size - 2, size - 2);
+  }
+
+  function drawMatrix(matrix, offset, context = ctx, size = SIZE) {
+    matrix.forEach((row, y) => row.forEach((v, x) => {
+      if (v) cell(x + offset.x, y + offset.y, COLORS[v], context, size);
+    }));
+  }
+
+  function drawNext() {
+    nctx.fillStyle = '#090d1b';
+    nctx.fillRect(0, 0, 100, 100);
+    const m = nextPiece.matrix;
+    const size = 20;
+    const ox = (5 - m[0].length) / 2;
+    const oy = (5 - m.length) / 2;
+    drawMatrix(m, {x: ox, y: oy}, nctx, size);
+  }
+
+  function draw() {
+    ctx.fillStyle = '#090d1b';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.strokeStyle = '#18243a';
+    ctx.lineWidth = 0.7;
+    for (let x = 0; x <= COLS; x++) {
+      ctx.beginPath(); ctx.moveTo(x * SIZE, 0);
+      ctx.lineTo(x * SIZE, canvas.height); ctx.stroke();
+    }
+    for (let y = 0; y <= ROWS; y++) {
+      ctx.beginPath(); ctx.moveTo(0, y * SIZE);
+      ctx.lineTo(canvas.width, y * SIZE); ctx.stroke();
+    }
+
+    drawMatrix(arena.map(row => row.map(v => v)), {x: 0, y: 0});
+
+    if (piece && !over) {
+      let ghostY = piece.y;
+      while (!collide({...piece, y: ghostY}, 0, 1)) ghostY++;
+      ctx.globalAlpha = 0.22;
+      drawMatrix(piece.matrix, {x: piece.x, y: ghostY});
+      ctx.globalAlpha = 1;
+      drawMatrix(piece.matrix, {x: piece.x, y: piece.y});
+    }
+
+    if (paused || over || !running) {
+      ctx.fillStyle = 'rgba(4,8,22,0.83)';
+      ctx.fillRect(0, 220, 300, 160);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#55f5ff';
+      ctx.font = 'bold 24px system-ui';
+      ctx.fillText(over ? 'GAME OVER' : paused ? 'PAUSED' : 'NEON BLOCKS', 150, 275);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = '14px system-ui';
+      ctx.fillText(over ? '按「重新開始」再玩一次' : paused ? '按 P 繼續遊戲' : '按「開始遊戲」', 150, 310);
+      if (over) {
+        ctx.fillStyle = '#ffe64a';
+        ctx.fillText('最終分數：' + score, 150, 345);
+      }
+    }
+  }
+
+  function frame(time = 0) {
+    const delta = time - lastTime;
+    lastTime = time;
+    if (running && !paused) {
+      dropCounter += delta;
+      const interval = Math.max(90, 800 - (level - 1) * 65);
+      if (dropCounter > interval) {
+        if (!collide(piece, 0, 1)) piece.y++;
+        else lock();
+        dropCounter = 0;
+      }
+      draw();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  document.addEventListener('keydown', e => {
+    if (['ArrowLeft','ArrowRight','ArrowDown','ArrowUp',' '].includes(e.key))
+      e.preventDefault();
+    if (e.key.toLowerCase() === 'r') {
+      initAudio(); reset(); return;
+    }
+    if (e.key.toLowerCase() === 'p') {
+      togglePause(); return;
+    }
+    if (!running || paused) return;
+    initAudio();
+    if (e.key === 'ArrowLeft') move(-1);
+    if (e.key === 'ArrowRight') move(1);
+    if (e.key === 'ArrowUp') rotate();
+    if (e.key === 'ArrowDown') softDrop();
+    if (e.key === ' ') hardDrop();
+  });
+
+  document.querySelectorAll('[data-key]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      initAudio();
+      const k = btn.dataset.key;
+      if (k === 'ArrowLeft') move(-1);
+      if (k === 'ArrowRight') move(1);
+      if (k === 'ArrowUp') rotate();
+      if (k === 'ArrowDown') softDrop();
+    });
+  });
+
+  document.getElementById('start').addEventListener('click', () => {
+    initAudio(); reset();
+  });
+  document.getElementById('pause').addEventListener('click', togglePause);
+  document.getElementById('mobilePause').addEventListener('click', togglePause);
+  document.getElementById('drop').addEventListener('click', () => {
+    initAudio(); hardDrop();
+  });
+
+  document.getElementById('sound').addEventListener('click', () => {
+    soundOn = !soundOn;
+    document.getElementById('sound').textContent =
+      soundOn ? '🔊 音效：開' : '🔇 音效：關';
+    if (soundOn) {
+      initAudio();
+      if (running && !paused) startMusic();
+      tone(660, 0.12);
+    } else stopMusic();
+  });
+
+  arena = Array.from({length: ROWS}, () => Array(COLS).fill(0));
+  piece = makePiece();
+  nextPiece = makePiece();
+  drawNext();
+  updateStats();
+  draw();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
